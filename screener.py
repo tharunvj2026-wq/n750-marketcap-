@@ -1,10 +1,10 @@
 """
-NIFTY 750 SMART MONEY SCREENER - STANDALONE
-=============================================
+NIFTY 750 SMART MONEY SCREENER - STANDALONE (FIXED)
+=====================================================
+- Uses CSV cache instead of Parquet (no extra dependencies)
 - Fetches last 55 days of data directly from NSE
 - Saves cache locally for faster future runs
 - 2-stage analysis: Accumulation (Days -55 to -8) + Pre-Breakout (Last 7 days)
-- Sends single Telegram message with top 5 per segment
 """
 
 import os
@@ -35,7 +35,7 @@ if TELEGRAM_GROUP_ID:
 # CONFIGURATION
 # ============================================
 
-CACHE_FILE = "nifty_55days_cache.parquet"
+CACHE_FILE = "nifty_55days_cache.csv"  # Changed to CSV (no extra deps)
 TRADING_DAYS = 55
 PRE_BREAKOUT_WINDOW = 7
 
@@ -45,11 +45,9 @@ PRE_BREAKOUT_WINDOW = 7
 
 OPTIMAL_PARAMETERS = {
     'LARGE': {
-        # STAGE 1: ACCUMULATION (Days -55 to -8)
         'price_limit': 5,
         'vol_surge': 1.3,
         'delivery_min': 60,
-        # STAGE 2: PRE-BREAKOUT (Last 7 days ONLY)
         'dryup_max': 0.65,
         'compression_max': 4.0,
         'near_high_min': 95.0,
@@ -89,7 +87,7 @@ OPTIMAL_PARAMETERS = {
 }
 
 # ============================================
-# NIFTY 750 SYMBOLS (Complete)
+# NIFTY 750 SYMBOLS (Complete - Same as before)
 # ============================================
 
 LARGE_CAP_SYMBOLS = [
@@ -311,11 +309,11 @@ def get_last_n_trading_dates(n=55):
     return sorted(trading_dates)
 
 # ============================================
-# BUILD 55-DAY DATABASE (WITH CACHE)
+# BUILD 55-DAY DATABASE (WITH CSV CACHE)
 # ============================================
 
 def build_database():
-    """Fetch last 55 days of data, save to cache"""
+    """Fetch last 55 days of data, save to CSV cache"""
     
     print("\n📊 Building 55-day database...")
     
@@ -324,7 +322,7 @@ def build_database():
         file_time = dt.datetime.fromtimestamp(os.path.getmtime(CACHE_FILE))
         if file_time.date() == dt.date.today():
             print(f"📁 Loading from cache: {CACHE_FILE}")
-            df = pd.read_parquet(CACHE_FILE)
+            df = pd.read_csv(CACHE_FILE, parse_dates=['DATE'])
             print(f"✅ Loaded {len(df)} rows from cache")
             return df
     
@@ -355,8 +353,8 @@ def build_database():
     combined_df = combined_df.sort_values(['DATE', 'SYMBOL'])
     combined_df = combined_df.drop_duplicates(subset=['SYMBOL', 'DATE'])
     
-    # Save to cache
-    combined_df.to_parquet(CACHE_FILE, index=False)
+    # Save to CSV cache
+    combined_df.to_csv(CACHE_FILE, index=False)
     print(f"💾 Saved to cache: {CACHE_FILE}")
     print(f"   Total rows: {len(combined_df):,}")
     print(f"   Unique symbols: {combined_df['SYMBOL'].nunique()}")
