@@ -1,15 +1,15 @@
 """
-NIFTY 750 SMART MONEY SCREENER - CORRECTED TIME WINDOWS
-=========================================================
-- ACCUMULATION: Days -55 to -8 (older data, excluding last 7 days)
-- PRE-BREAKOUT: Last 7 days ONLY
-- Single message with top 5 stocks per segment
+NIFTY 750 SMART MONEY SCREENER - STANDALONE
+=============================================
+- Fetches last 55 days of data directly from NSE
+- Saves cache locally for faster future runs
+- 2-stage analysis: Accumulation (Days -55 to -8) + Pre-Breakout (Last 7 days)
+- Sends single Telegram message with top 5 per segment
 """
 
 import os
 import time
 import requests
-import duckdb
 import pandas as pd
 import numpy as np
 import datetime as dt
@@ -18,7 +18,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================
-# TELEGRAM CONFIGURATION
+# TELEGRAM CONFIGURATION (from GitHub Secrets)
 # ============================================
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -32,13 +32,15 @@ if TELEGRAM_GROUP_ID:
     TELEGRAM_CHAT_IDS.append(TELEGRAM_GROUP_ID)
 
 # ============================================
-# DATABASE CONFIGURATION
+# CONFIGURATION
 # ============================================
 
-DB_FILE = "nifty_750_database.duckdb"
+CACHE_FILE = "nifty_55days_cache.parquet"
+TRADING_DAYS = 55
+PRE_BREAKOUT_WINDOW = 7
 
 # ============================================
-# OPTIMAL PARAMETERS (Two-stage)
+# OPTIMAL PARAMETERS (2-Stage)
 # ============================================
 
 OPTIMAL_PARAMETERS = {
@@ -243,236 +245,283 @@ def send_telegram_message(message):
     return success > 0
 
 # ============================================
-# FETCH LATEST BHAVCOPY
+# FETCH BHAVCOPY FOR A SINGLE DATE
 # ============================================
 
-def fetch_latest_bhavcopy():
-    """Fetch latest bhavcopy from NSE"""
+def fetch_bhavcopy_for_date(date):
+    """Fetch bhavcopy for a specific date"""
     try:
         from nselib import capital_market
+        date_str = date.strftime('%d-%m-%Y')
+        df = capital_market.bhav_copy_with_delivery(trade_date=date_str)
         
-        today = dt.date.today()
-        for days_back in range(1, 5):
-            check_date = today - relativedelta(days=days_back)
-            if check_date.weekday() >= 5:
-                continue
-            
-            date_str = check_date.strftime('%d-%m-%Y')
-            print(f"Fetching data for {date_str}...")
-            
-            df = capital_market.bhav_copy_with_delivery(trade_date=date_str)
-            
-            if df is not None and len(df) > 0:
-                print(f"✅ Fetched {len(df)} rows")
-                return df, check_date
+        if df is None or len(df) == 0:
+            return None
         
-        print("❌ No data found")
-        return None, None
+        df.columns = df.columns.str.upper().str.strip()
+        
+        result = pd.DataFrame()
+        result['SYMBOL'] = df['SYMBOL'].astype(str).str.strip().str.upper()
+        result['SERIES'] = df['SERIES'].astype(str).str.strip().str.upper()
+        result['CLOSE'] = pd.to_numeric(df['CLOSE_PRICE'], errors='coerce')
+        result['VOLUME'] = pd.to_numeric(df['TTL_TRD_QNTY'], errors='coerce')
+        result['DELIVERY'] = pd.to_numeric(df['DELIV_PER'], errors='coerce')
+        result['DATE'] = date
+        
+        # Filter EQ series and our symbols
+        result = result[result['SERIES'] == 'EQ']
+        result = result[result['SYMBOL'].isin(ALL_SYMBOLS)]
+        result = result[result['CLOSE'].notna()]
+        result = result[result['VOLUME'].notna()]
+        
+        return result[['SYMBOL', 'DATE', 'CLOSE', 'VOLUME', 'DELIVERY']]
         
     except Exception as e:
-        print(f"Error: {e}")
-        return None, None
-
-# ============================================
-# TWO-STAGE SCREENING (Corrected time windows)
-# ============================================
-
-def calculate_two_stage_metrics(symbol, trade_date, params):
-    """
-    CORRECTED LOGIC:
-    - STAGE 1 (Accumulation): Days -55 to -8 (excludes last 7 days)
-    - STAGE 2 (Pre-Breakout): Last 7 days ONLY
-    """
-    try:
-        if not os.path.exists(DB_FILE):
-            return None
-        
-        con = duckdb.connect(DB_FILE)
-        
-        # Get data for the stock
-        query = f"""
-            SELECT 
-                DATE,
-                CLOSE,
-                VOLUME,
-                DELIVERY,
-                ROW_NUMBER() OVER (ORDER BY DATE DESC) as rn_desc
-            FROM bhavcopy
-            WHERE SYMBOL = '{symbol}'
-            ORDER BY DATE
-        """
-        
-        df = con.execute(query).fetchdf()
-        con.close()
-        
-        if len(df) < 55:
-            return None
-        
-        # Split data into two periods
-        # Last 7 days = Pre-Breakout window
-        # Days before that = Accumulation window
-        
-        total_rows = len(df)
-        pre_breakout_data = df.iloc[-7:].copy()  # Last 7 days
-        accumulation_data = df.iloc[:-7].copy()  # Days -55 to -8
-        
-        if len(accumulation_data) < 30:
-            return None
-        
-        # ============================================
-        # STAGE 1: ACCUMULATION (Days -55 to -8)
-        # ============================================
-        
-        # 1.1 Price change over 20 days (within accumulation data)
-        if len(accumulation_data) >= 21:
-            price_20d_ago = accumulation_data['CLOSE'].iloc[-21]
-            current_price_acc = accumulation_data['CLOSE'].iloc[-1]
-            price_change = ((current_price_acc - price_20d_ago) / price_20d_ago) * 100
-        else:
-            return None
-        
-        if abs(price_change) > params['price_limit']:
-            return None
-        
-        # 1.2 Volume surge (7d vs prev 28d) within accumulation data
-        if len(accumulation_data) >= 35:
-            last_7_vol = accumulation_data['VOLUME'].iloc[-7:].mean()
-            prev_28_vol = accumulation_data['VOLUME'].iloc[-35:-7].mean()
-            vol_surge = last_7_vol / prev_28_vol if prev_28_vol > 0 else 1
-        else:
-            return None
-        
-        if vol_surge < params['vol_surge']:
-            return None
-        
-        # 1.3 Delivery rising trend within accumulation data
-        if len(accumulation_data) >= 10:
-            last_5_delivery = accumulation_data['DELIVERY'].iloc[-5:].mean()
-            prev_5_delivery = accumulation_data['DELIVERY'].iloc[-10:-5].mean()
-        else:
-            return None
-        
-        if last_5_delivery <= prev_5_delivery:
-            return None
-        
-        if last_5_delivery < params['delivery_min']:
-            return None
-        
-        # ============================================
-        # STAGE 2: PRE-BREAKOUT (Last 7 days ONLY)
-        # ============================================
-        
-        if len(pre_breakout_data) < 5:
-            return None
-        
-        # 2.1 Volume Dry-up (5d vs 20d) - using last 5 days vs 20 days before pre-breakout
-        vol_5d = pre_breakout_data['VOLUME'].mean()
-        vol_20d_history = df['VOLUME'].iloc[-27:-7].mean() if len(df) >= 27 else vol_5d
-        vol_dryup = vol_5d / vol_20d_history if vol_20d_history > 0 else 1
-        
-        if vol_dryup > params['dryup_max']:
-            return None
-        
-        # 2.2 Tight Range (last 10 days, mostly pre-breakout period)
-        high_10d = df['CLOSE'].iloc[-10:].max()
-        low_10d = df['CLOSE'].iloc[-10:].min()
-        current_price = pre_breakout_data['CLOSE'].iloc[-1]
-        range_pct = ((high_10d - low_10d) / current_price) * 100 if current_price > 0 else 0
-        
-        if range_pct > params['compression_max']:
-            return None
-        
-        # 2.3 Near Breakout (20-day high from before pre-breakout)
-        high_20d = df['CLOSE'].iloc[-27:-7].max() if len(df) >= 27 else current_price
-        near_high_pct = (current_price / high_20d) * 100 if high_20d > 0 else 0
-        
-        if near_high_pct < params['near_high_min']:
-            return None
-        
-        # 2.4 Delivery holding (current delivery)
-        current_delivery = pre_breakout_data['DELIVERY'].iloc[-1]
-        
-        # ============================================
-        # CALCULATE QUALITY SCORE
-        # ============================================
-        
-        score = 0
-        if vol_surge >= params['vol_surge'] * 1.2: score += 1
-        if vol_dryup <= params['dryup_max'] * 0.8: score += 1
-        if near_high_pct >= 98: score += 1
-        if range_pct <= 3: score += 1
-        if current_delivery >= params['delivery_min'] + 10: score += 1
-        
-        return {
-            'price_change': round(price_change, 2),
-            'vol_surge': round(vol_surge, 2),
-            'vol_dryup': round(vol_dryup, 2),
-            'delivery_acc': round(last_5_delivery, 1),
-            'delivery_current': round(current_delivery, 1),
-            'near_high_pct': round(near_high_pct, 1),
-            'range_pct': round(range_pct, 2),
-            'quality_score': score
-        }
-        
-    except Exception as e:
-        print(f"  Error for {symbol}: {e}")
         return None
+
+# ============================================
+# GET LAST 55 TRADING DATES
+# ============================================
+
+def get_last_n_trading_dates(n=55):
+    """Get last n trading dates"""
+    from nselib import trading_holiday_calendar
+    
+    try:
+        holidays_df = trading_holiday_calendar()
+        holidays = set()
+        if holidays_df is not None and len(holidays_df) > 0:
+            date_col = 'TRADING_DATE' if 'TRADING_DATE' in holidays_df.columns else 'DATE'
+            if date_col in holidays_df.columns:
+                holidays = set(pd.to_datetime(holidays_df[date_col]).dt.date)
+    except:
+        holidays = set()
+    
+    trading_dates = []
+    current_date = dt.datetime.now().date()
+    days_checked = 0
+    
+    while len(trading_dates) < n and days_checked < 110:
+        days_checked += 1
+        check_date = current_date - relativedelta(days=days_checked)
+        if check_date.weekday() >= 5 or check_date in holidays:
+            continue
+        trading_dates.append(check_date)
+    
+    return sorted(trading_dates)
+
+# ============================================
+# BUILD 55-DAY DATABASE (WITH CACHE)
+# ============================================
+
+def build_database():
+    """Fetch last 55 days of data, save to cache"""
+    
+    print("\n📊 Building 55-day database...")
+    
+    # Check if cache exists and is recent
+    if os.path.exists(CACHE_FILE):
+        file_time = dt.datetime.fromtimestamp(os.path.getmtime(CACHE_FILE))
+        if file_time.date() == dt.date.today():
+            print(f"📁 Loading from cache: {CACHE_FILE}")
+            df = pd.read_parquet(CACHE_FILE)
+            print(f"✅ Loaded {len(df)} rows from cache")
+            return df
+    
+    # Fetch fresh data
+    print("📡 Fetching fresh data from NSE...")
+    trading_dates = get_last_n_trading_dates(TRADING_DAYS)
+    print(f"📅 Trading dates: {len(trading_dates)}")
+    print(f"   Range: {trading_dates[0]} to {trading_dates[-1]}")
+    
+    all_data = []
+    for i, date in enumerate(trading_dates, 1):
+        print(f"\r   [{i}/{len(trading_dates)}] {date.strftime('%d-%b-%Y')}...", end=" ")
+        df = fetch_bhavcopy_for_date(date)
+        if df is not None and len(df) > 0:
+            all_data.append(df)
+            print(f"✓ {len(df)}", end="")
+        else:
+            print(f"✗", end="")
+        time.sleep(0.3)
+    
+    print()
+    
+    if not all_data:
+        print("❌ No data fetched")
+        return None
+    
+    combined_df = pd.concat(all_data, ignore_index=True)
+    combined_df = combined_df.sort_values(['DATE', 'SYMBOL'])
+    combined_df = combined_df.drop_duplicates(subset=['SYMBOL', 'DATE'])
+    
+    # Save to cache
+    combined_df.to_parquet(CACHE_FILE, index=False)
+    print(f"💾 Saved to cache: {CACHE_FILE}")
+    print(f"   Total rows: {len(combined_df):,}")
+    print(f"   Unique symbols: {combined_df['SYMBOL'].nunique()}")
+    
+    return combined_df
+
+# ============================================
+# TWO-STAGE SCREENING
+# ============================================
+
+def analyze_stock(stock_df, symbol, segment):
+    """Analyze single stock with 2-stage logic"""
+    
+    params = OPTIMAL_PARAMETERS[segment]
+    stock_df = stock_df.sort_values('DATE')
+    
+    if len(stock_df) < TRADING_DAYS:
+        return None
+    
+    # Split data
+    acc_data = stock_df.iloc[:-PRE_BREAKOUT_WINDOW]  # Days -55 to -8
+    pb_data = stock_df.iloc[-PRE_BREAKOUT_WINDOW:]   # Last 7 days
+    
+    if len(acc_data) < 30:
+        return None
+    
+    # ========== STAGE 1: ACCUMULATION ==========
+    
+    # Price change over 20 days
+    if len(acc_data) >= 21:
+        price_20d_ago = acc_data['CLOSE'].iloc[-21]
+        current_price_acc = acc_data['CLOSE'].iloc[-1]
+        price_change = ((current_price_acc - price_20d_ago) / price_20d_ago) * 100
+    else:
+        return None
+    
+    if abs(price_change) > params['price_limit']:
+        return None
+    
+    # Volume surge
+    if len(acc_data) >= 35:
+        last_7_vol = acc_data['VOLUME'].iloc[-7:].mean()
+        prev_28_vol = acc_data['VOLUME'].iloc[-35:-7].mean()
+        vol_surge = last_7_vol / prev_28_vol if prev_28_vol > 0 else 1
+    else:
+        return None
+    
+    if vol_surge < params['vol_surge']:
+        return None
+    
+    # Delivery rising
+    if len(acc_data) >= 10:
+        last_5_delivery = acc_data['DELIVERY'].iloc[-5:].mean()
+        prev_5_delivery = acc_data['DELIVERY'].iloc[-10:-5].mean()
+    else:
+        return None
+    
+    if last_5_delivery <= prev_5_delivery:
+        return None
+    
+    if last_5_delivery < params['delivery_min']:
+        return None
+    
+    # ========== STAGE 2: PRE-BREAKOUT ==========
+    
+    # Volume dry-up
+    if len(stock_df) >= 27:
+        vol_5d = pb_data['VOLUME'].mean()
+        vol_20d_history = stock_df['VOLUME'].iloc[-27:-7].mean()
+        vol_dryup = vol_5d / vol_20d_history if vol_20d_history > 0 else 1
+    else:
+        return None
+    
+    if vol_dryup > params['dryup_max']:
+        return None
+    
+    # Near breakout
+    if len(stock_df) >= 27:
+        high_20d = stock_df['CLOSE'].iloc[-27:-7].max()
+        current_price = pb_data['CLOSE'].iloc[-1]
+        near_high_pct = (current_price / high_20d) * 100 if high_20d > 0 else 0
+    else:
+        return None
+    
+    if near_high_pct < params['near_high_min']:
+        return None
+    
+    # Tight range
+    if len(stock_df) >= 10:
+        high_10d = stock_df['CLOSE'].iloc[-10:].max()
+        low_10d = stock_df['CLOSE'].iloc[-10:].min()
+        range_pct = ((high_10d - low_10d) / current_price) * 100 if current_price > 0 else 0
+    else:
+        return None
+    
+    if range_pct > params['compression_max']:
+        return None
+    
+    # Delivery holding
+    current_delivery = pb_data['DELIVERY'].iloc[-1]
+    
+    # Calculate quality score
+    score = 0
+    if vol_surge >= params['vol_surge'] * 1.2: score += 1
+    if vol_dryup <= params['dryup_max'] * 0.8: score += 1
+    if near_high_pct >= 98: score += 1
+    if range_pct <= 3: score += 1
+    if current_delivery >= params['delivery_min'] + 10: score += 1
+    
+    return {
+        'symbol': symbol,
+        'segment': segment,
+        'ltp': round(current_price, 2),
+        'price_change': round(price_change, 1),
+        'vol_surge': round(vol_surge, 2),
+        'vol_dryup': round(vol_dryup, 2),
+        'delivery_acc': round(last_5_delivery, 1),
+        'delivery_cur': round(current_delivery, 1),
+        'near_high': round(near_high_pct, 1),
+        'range_pct': round(range_pct, 1),
+        'score': score,
+        'exp_return': params['expected_return'],
+        'win_rate': params['win_rate']
+    }
 
 # ============================================
 # PROCESS ALL STOCKS
 # ============================================
 
-def process_all_stocks(trade_date):
+def process_all_stocks(df):
     """Process all stocks and return signals"""
     
-    print(f"\n📊 Screening {len(ALL_SYMBOLS)} stocks...")
+    print(f"\n🔍 Screening {df['SYMBOL'].nunique()} stocks...")
     
     all_signals = []
-    processed = 0
+    symbols = df['SYMBOL'].unique()
     
-    for symbol in ALL_SYMBOLS:
+    for i, symbol in enumerate(symbols):
+        if (i + 1) % 100 == 0:
+            print(f"   Progress: {i+1}/{len(symbols)}")
+        
         segment = SYMBOL_TO_SEGMENT.get(symbol)
         if not segment:
             continue
         
-        params = OPTIMAL_PARAMETERS[segment]
-        metrics = calculate_two_stage_metrics(symbol, trade_date, params)
+        stock_df = df[df['SYMBOL'] == symbol].copy()
+        result = analyze_stock(stock_df, symbol, segment)
         
-        if metrics:
-            all_signals.append({
-                'SYMBOL': symbol,
-                'SEGMENT': segment,
-                'LTP': round(metrics.get('current_price', 0), 2),
-                'PRICE_CHANGE': metrics['price_change'],
-                'VOL_SURGE': metrics['vol_surge'],
-                'VOL_DRYUP': metrics['vol_dryup'],
-                'DELIVERY_ACC': metrics['delivery_acc'],
-                'DELIVERY_CUR': metrics['delivery_current'],
-                'NEAR_HIGH': metrics['near_high_pct'],
-                'RANGE': metrics['range_pct'],
-                'SCORE': metrics['quality_score'],
-                'EXP_RETURN': params['expected_return'],
-                'WIN_RATE': params['win_rate']
-            })
-        
-        processed += 1
-        if processed % 100 == 0:
-            print(f"   Processed {processed}/{len(ALL_SYMBOLS)} stocks...")
+        if result:
+            all_signals.append(result)
     
     # Sort by score
-    all_signals.sort(key=lambda x: x['SCORE'], reverse=True)
+    all_signals.sort(key=lambda x: x['score'], reverse=True)
     
-    print(f"\n✅ Found {len(all_signals)} total signals")
+    print(f"\n✅ Found {len(all_signals)} signals")
     
-    # Breakdown by segment
+    # Breakdown
     for segment in ['LARGE', 'MID', 'SMALL', 'MICRO']:
-        count = len([s for s in all_signals if s['SEGMENT'] == segment])
-        print(f"   {segment}: {count} signals")
+        count = len([s for s in all_signals if s['segment'] == segment])
+        print(f"   {segment}: {count}")
     
     return all_signals
 
 # ============================================
-# FORMAT SINGLE REPORT MESSAGE
+# FORMAT REPORT MESSAGE
 # ============================================
 
 def format_report_message(signals, trade_date):
@@ -483,12 +532,13 @@ def format_report_message(signals, trade_date):
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📅 Date: {trade_date.strftime('%d-%b-%Y')}
 📊 Total Signals: {len(signals)}
+📈 Analysis: 55 days | Accumulation + Pre-Breakout
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 """
     
     for segment in ['LARGE', 'MID', 'SMALL', 'MICRO']:
-        segment_signals = [s for s in signals if s['SEGMENT'] == segment][:5]
+        segment_signals = [s for s in signals if s['segment'] == segment][:5]
         
         if segment_signals:
             message += f"\n<b>🔥 {segment} CAP</b>\n"
@@ -497,8 +547,7 @@ def format_report_message(signals, trade_date):
             message += f"├─────┼──────────────┼──────────┼────────┼────────┼────────┤\n"
             
             for idx, s in enumerate(segment_signals, 1):
-                emoji = "⭐" * s['SCORE'] if s['SCORE'] > 0 else "•"
-                message += f"│ {idx:<3} │ {s['SYMBOL']:<12} │ ₹{s['LTP']:<8.2f} │ {s['VOL_SURGE']:.1f}x    │ {s['VOL_DRYUP']:.2f}x   │ {s['NEAR_HIGH']:.0f}%    │\n"
+                message += f"│ {idx:<3} │ {s['symbol']:<12} │ ₹{s['ltp']:<8.2f} │ {s['vol_surge']:.1f}x    │ {s['vol_dryup']:.2f}x   │ {s['near_high']:.0f}%    │\n"
             
             message += f"└─────┴──────────────┴──────────┴────────┴────────┴────────┘\n"
     
@@ -523,7 +572,7 @@ def main():
     print(f"Time: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     
-    # Check Telegram configuration
+    # Check Telegram
     if not TELEGRAM_BOT_TOKEN:
         print("❌ TELEGRAM_BOT_TOKEN not set!")
         return
@@ -534,25 +583,21 @@ def main():
     
     print(f"✅ Telegram configured for {len(TELEGRAM_CHAT_IDS)} chat(s)")
     
-    # Check if database exists
-    if not os.path.exists(DB_FILE):
-        print(f"❌ Database not found: {DB_FILE}")
-        print("   Please build the database first")
-        send_telegram_message("🔴 NIFTY Screener failed: Database not found")
+    # Build database (55 days)
+    df = build_database()
+    
+    if df is None or len(df) == 0:
+        print("❌ Failed to build database")
+        send_telegram_message("🔴 NIFTY Screener failed: Unable to fetch data")
         return
     
-    # Get trade date
-    trade_date = dt.date.today()
-    for days_back in range(1, 5):
-        check_date = trade_date - relativedelta(days=days_back)
-        if check_date.weekday() < 5:
-            trade_date = check_date
-            break
+    # Get trade date (latest date in data)
+    trade_date = df['DATE'].max()
     
     # Process all stocks
-    signals = process_all_stocks(trade_date)
+    signals = process_all_stocks(df)
     
-    # Send single report message
+    # Send report
     if signals:
         message = format_report_message(signals, trade_date)
         send_telegram_message(message)
@@ -564,10 +609,7 @@ def main():
 📅 Date: {trade_date.strftime('%d-%b-%Y')}
 ❌ <b>NO STOCKS FOUND</b>
 
-No stocks passed both stages:
-- Stage 1: Accumulation (Days -55 to -8)
-- Stage 2: Pre-Breakout (Last 7 days ONLY)
-
+No stocks passed both stages.
 ⏰ {dt.datetime.now().strftime('%d-%b-%Y %H:%M:%S')}
 """
         send_telegram_message(message)
