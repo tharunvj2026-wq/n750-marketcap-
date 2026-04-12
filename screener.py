@@ -1,10 +1,9 @@
 """
-NIFTY 750 SMART MONEY SCREENER - FINAL
-========================================
-- Accumulation: Days -55 to -8
-- Pre-Breakout: Last 7 days ONLY
-- No near high filter
-- Clean report with TOP 5 stocks only
+NIFTY 750 ACCUMULATION FINDER
+===============================
+- 40 days of data
+- Finds stocks with institutional accumulation
+- Top 5 per market cap
 """
 
 import os
@@ -32,42 +31,18 @@ if TELEGRAM_GROUP_ID:
     TELEGRAM_CHAT_IDS.append(TELEGRAM_GROUP_ID)
 
 # ============================================
-# FIXED PARAMETERS
+# ACCUMULATION PARAMETERS
 # ============================================
 
-FIXED_PARAMETERS = {
-    'LARGE': {
-        'price_limit': 3,
-        'vol_surge': 1.1,
-        'delivery_min': 65,
-        'dryup_max': 0.60,
-        'compression_max': 4.0
-    },
-    'MID': {
-        'price_limit': 8,
-        'vol_surge': 1.2,
-        'delivery_min': 60,
-        'dryup_max': 0.60,
-        'compression_max': 5.0
-    },
-    'SMALL': {
-        'price_limit': 7,
-        'vol_surge': 2.2,
-        'delivery_min': 55,
-        'dryup_max': 0.55,
-        'compression_max': 6.0
-    },
-    'MICRO': {
-        'price_limit': 8,
-        'vol_surge': 1.6,
-        'delivery_min': 50,
-        'dryup_max': 0.50,
-        'compression_max': 7.0
-    }
+PARAMETERS = {
+    'LARGE': {'price_limit': 4, 'vol_surge': 1.2, 'delivery_min': 50},
+    'MID': {'price_limit': 6, 'vol_surge': 1.3, 'delivery_min': 45},
+    'SMALL': {'price_limit': 7, 'vol_surge': 1.5, 'delivery_min': 43},
+    'MICRO': {'price_limit': 8, 'vol_surge': 1.8, 'delivery_min': 42}
 }
 
 # ============================================
-# NIFTY 750 SYMBOLS (Complete)
+# NIFTY 750 SYMBOLS
 # ============================================
 
 LARGE_CAP_SYMBOLS = [
@@ -189,7 +164,7 @@ MICRO_CAP_SYMBOLS = [
     'STARCEMENT', 'PRSMJOHNSN', 'SKFINDUS', 'WAKEFIT', 'JLHL'
 ]
 
-# Create symbol to segment mapping
+# Create mapping
 SYMBOL_TO_SEGMENT = {}
 for s in LARGE_CAP_SYMBOLS: SYMBOL_TO_SEGMENT[s] = 'LARGE'
 for s in MID_CAP_SYMBOLS: SYMBOL_TO_SEGMENT[s] = 'MID'
@@ -197,30 +172,10 @@ for s in SMALL_CAP_SYMBOLS: SYMBOL_TO_SEGMENT[s] = 'SMALL'
 for s in MICRO_CAP_SYMBOLS: SYMBOL_TO_SEGMENT[s] = 'MICRO'
 
 ALL_SYMBOLS = set(SYMBOL_TO_SEGMENT.keys())
-
 print(f"✅ Loaded {len(ALL_SYMBOLS)} stocks")
 
 # ============================================
-# TELEGRAM FUNCTIONS
-# ============================================
-
-def send_telegram_message(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
-        return False
-    success = 0
-    for chat_id in TELEGRAM_CHAT_IDS:
-        try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}
-            response = requests.post(url, json=payload, timeout=30)
-            if response.status_code == 200:
-                success += 1
-        except Exception as e:
-            print(f"Error: {e}")
-    return success > 0
-
-# ============================================
-# FETCH BHAVCOPY
+# FETCH FUNCTIONS
 # ============================================
 
 def fetch_bhavcopy_for_date(date):
@@ -245,11 +200,7 @@ def fetch_bhavcopy_for_date(date):
     except Exception as e:
         return None
 
-# ============================================
-# GET LAST 55 TRADING DATES
-# ============================================
-
-def get_last_n_trading_dates(n=55):
+def get_last_n_trading_dates(n=40):
     from nselib import trading_holiday_calendar
     try:
         holidays_df = trading_holiday_calendar()
@@ -263,7 +214,7 @@ def get_last_n_trading_dates(n=55):
     dates = []
     current = dt.date.today()
     days_checked = 0
-    while len(dates) < n and days_checked < 110:
+    while len(dates) < n and days_checked < 90:
         days_checked += 1
         check = current - relativedelta(days=days_checked)
         if check.weekday() >= 5 or check in holidays:
@@ -271,11 +222,7 @@ def get_last_n_trading_dates(n=55):
         dates.append(check)
     return sorted(dates)
 
-# ============================================
-# BUILD DATABASE
-# ============================================
-
-CACHE_FILE = "nifty_55days_cache.csv"
+CACHE_FILE = "nifty_40days_cache.csv"
 
 def build_database():
     if os.path.exists(CACHE_FILE):
@@ -283,7 +230,7 @@ def build_database():
         if file_time.date() == dt.date.today():
             df = pd.read_csv(CACHE_FILE, parse_dates=['DATE'])
             return df
-    dates = get_last_n_trading_dates(55)
+    dates = get_last_n_trading_dates(40)
     all_data = []
     for date in dates:
         df = fetch_bhavcopy_for_date(date)
@@ -299,27 +246,33 @@ def build_database():
     return combined
 
 # ============================================
-# ANALYZE STOCK
+# ACCUMULATION ANALYSIS
 # ============================================
 
-def analyze_stock(stock_df, symbol, segment):
-    params = FIXED_PARAMETERS[segment]
+def analyze_accumulation(stock_df, symbol, segment):
+    params = PARAMETERS[segment]
     stock_df = stock_df.sort_values('DATE')
-    if len(stock_df) < 55:
+    
+    if len(stock_df) < 40:
         return None
-    acc_data = stock_df.iloc[:-7]
-    pb_data = stock_df.iloc[-7:]
+    
+    # Use all 40 days for accumulation
+    acc_data = stock_df
+    
     if len(acc_data) < 30:
         return None
-    # Stage 1: Accumulation
+    
+    # Price change over 20 days
     if len(acc_data) >= 21:
         price_20d_ago = acc_data['CLOSE'].iloc[-21]
-        curr_acc = acc_data['CLOSE'].iloc[-1]
-        price_change = ((curr_acc - price_20d_ago) / price_20d_ago) * 100
+        current_price_acc = acc_data['CLOSE'].iloc[-1]
+        price_change = ((current_price_acc - price_20d_ago) / price_20d_ago) * 100
         if abs(price_change) > params['price_limit']:
             return None
     else:
         return None
+    
+    # Volume surge (7d vs prev 28d)
     if len(acc_data) >= 35:
         last_7_vol = acc_data['VOLUME'].iloc[-7:].mean()
         prev_28_vol = acc_data['VOLUME'].iloc[-35:-7].mean()
@@ -328,42 +281,47 @@ def analyze_stock(stock_df, symbol, segment):
             return None
     else:
         return None
+    
+    # Delivery rising and minimum
     if len(acc_data) >= 10:
-        last_5_del = acc_data['DELIVERY'].iloc[-5:].mean()
-        prev_5_del = acc_data['DELIVERY'].iloc[-10:-5].mean()
-        if last_5_del <= prev_5_del:
+        last_5_delivery = acc_data['DELIVERY'].iloc[-5:].mean()
+        prev_5_delivery = acc_data['DELIVERY'].iloc[-10:-5].mean()
+        if last_5_delivery <= prev_5_delivery:
             return None
-        if last_5_del < params['delivery_min']:
-            return None
-    else:
-        return None
-    # Stage 2: Pre-Breakout
-    if len(stock_df) >= 27:
-        vol_5d = pb_data['VOLUME'].mean()
-        vol_20d_hist = stock_df['VOLUME'].iloc[-27:-7].mean()
-        vol_dryup = vol_5d / vol_20d_hist if vol_20d_hist > 0 else 1
-        if vol_dryup > params['dryup_max']:
+        if last_5_delivery < params['delivery_min']:
             return None
     else:
         return None
-    if len(stock_df) >= 10:
-        high_10d = stock_df['CLOSE'].iloc[-10:].max()
-        low_10d = stock_df['CLOSE'].iloc[-10:].min()
-        curr_price = pb_data['CLOSE'].iloc[-1]
-        range_pct = ((high_10d - low_10d) / curr_price) * 100 if curr_price > 0 else 0
-        if range_pct > params['compression_max']:
-            return None
-    else:
-        return None
+    
+    current_price = stock_df['CLOSE'].iloc[-1]
+    
     return {
         'symbol': symbol,
         'segment': segment,
-        'ltp': round(curr_price, 2),
+        'ltp': round(current_price, 2),
+        'price_change': round(price_change, 1),
         'vol_surge': round(vol_surge, 2),
-        'delivery': round(last_5_del, 1),
-        'vol_dryup': round(vol_dryup, 2),
-        'range': round(range_pct, 1)
+        'delivery': round(last_5_delivery, 1)
     }
+
+# ============================================
+# TELEGRAM
+# ============================================
+
+def send_telegram_message(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
+        return False
+    success = 0
+    for chat_id in TELEGRAM_CHAT_IDS:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {'chat_id': chat_id, 'text': message, 'parse_mode': 'HTML'}
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code == 200:
+                success += 1
+        except Exception as e:
+            print(f"Error: {e}")
+    return success > 0
 
 # ============================================
 # MAIN
@@ -371,9 +329,8 @@ def analyze_stock(stock_df, symbol, segment):
 
 def main():
     print("=" * 60)
-    print("🚀 NIFTY 750 SMART MONEY SCREENER")
+    print("🚀 NIFTY 750 ACCUMULATION FINDER")
     print("=" * 60)
-    print(f"Time: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         print("❌ Telegram not configured")
@@ -381,11 +338,13 @@ def main():
     
     df = build_database()
     if df is None or len(df) == 0:
-        send_telegram_message("🔴 NIFTY Screener failed: Unable to fetch data")
+        send_telegram_message("🔴 Failed to fetch data")
         return
     
     trade_date = df['DATE'].max()
-    signals = []
+    
+    # Collect signals
+    all_signals = {seg: [] for seg in ['LARGE', 'MID', 'SMALL', 'MICRO']}
     symbols = df['SYMBOL'].unique()
     
     for symbol in symbols:
@@ -393,40 +352,35 @@ def main():
         if not segment:
             continue
         stock_df = df[df['SYMBOL'] == symbol].copy()
-        result = analyze_stock(stock_df, symbol, segment)
+        result = analyze_accumulation(stock_df, symbol, segment)
         if result:
-            signals.append(result)
+            all_signals[segment].append(result)
     
-    signals.sort(key=lambda x: x['vol_surge'], reverse=True)
-    top_signals = signals[:5]
+    # Sort by volume surge
+    for seg in all_signals:
+        all_signals[seg].sort(key=lambda x: x['vol_surge'], reverse=True)
     
-    if top_signals:
-        message = f"""
-🚀 <b>NIFTY 750 PRE-BREAKOUT SIGNALS</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📅 Date: {trade_date.strftime('%d-%b-%Y')}
-📊 Total: {len(signals)} signals | Top 5 shown
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Build message
+    message = f"""
+🚀 NIFTY 750 ACCUMULATION
+📅 {trade_date.strftime('%d-%b-%Y')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 """
-        for i, s in enumerate(top_signals, 1):
-            message += f"""
-<b>{i}. {s['symbol']}</b> | {s['segment']} CAP
-   💰 LTP: ₹{s['ltp']:.2f}
-   📈 Volume Surge: {s['vol_surge']:.1f}x
-   📦 Delivery: {s['delivery']}%
-   📉 Volume Dry-up: {s['vol_dryup']:.2f}x
-   📐 Range: {s['range']:.1f}%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        send_telegram_message(message)
-        print(f"✅ Sent {len(top_signals)} signals")
-    else:
-        send_telegram_message(f"🔴 No stocks passed filters on {trade_date.strftime('%d-%b-%Y')}")
-        print("No signals found")
+    total = 0
+    for seg in ['LARGE', 'MID', 'SMALL', 'MICRO']:
+        signals = all_signals[seg][:5]
+        if signals:
+            total += len(signals)
+            message += f"\n🔥 {seg} CAP\n"
+            for i, s in enumerate(signals, 1):
+                message += f"{i}. {s['symbol']} | ₹{s['ltp']} | {s['price_change']:+.1f}% | {s['vol_surge']}x | {s['delivery']}%\n"
     
-    print("=" * 60)
-    print("✅ SCREENER COMPLETE")
+    if total == 0:
+        message = f"🔴 No accumulation signals on {trade_date.strftime('%d-%b-%Y')}"
+    
+    send_telegram_message(message)
+    print(f"✅ Sent {total} signals")
 
 if __name__ == "__main__":
     main()
