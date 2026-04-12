@@ -1,16 +1,13 @@
 """
-NIFTY 750 SMART MONEY SCREENER
-================================
-- Runs daily at 6:00 AM IST
-- Scans 750 stocks across 4 market cap segments
-- Uses optimized parameters from 10-year backtest
-- Sends Telegram alerts
+NIFTY 750 SMART MONEY SCREENER - CORRECTED TIME WINDOWS
+=========================================================
+- ACCUMULATION: Days -55 to -8 (older data, excluding last 7 days)
+- PRE-BREAKOUT: Last 7 days ONLY
+- Single message with top 5 stocks per segment
 """
 
 import os
-import sys
 import time
-import json
 import requests
 import duckdb
 import pandas as pd
@@ -21,14 +18,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ============================================
-# TELEGRAM CONFIGURATION (from GitHub Secrets)
+# TELEGRAM CONFIGURATION
 # ============================================
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TELEGRAM_GROUP_ID = os.environ.get("TELEGRAM_GROUP_ID")
 
-# Build chat IDs list
 TELEGRAM_CHAT_IDS = []
 if TELEGRAM_CHAT_ID:
     TELEGRAM_CHAT_IDS.append(TELEGRAM_CHAT_ID)
@@ -42,54 +38,56 @@ if TELEGRAM_GROUP_ID:
 DB_FILE = "nifty_750_database.duckdb"
 
 # ============================================
-# OPTIMAL PARAMETERS (from 10-year backtest)
+# OPTIMAL PARAMETERS (Two-stage)
 # ============================================
 
 OPTIMAL_PARAMETERS = {
     'LARGE': {
-        'price_limit': 3,
-        'vol_surge': 1.1,
-        'delivery_min': 65,
-        'dryup_max': 0.60,
-        'compression_max': 3.0,
-        'atr_max': 3.0,
+        # STAGE 1: ACCUMULATION (Days -55 to -8)
+        'price_limit': 5,
+        'vol_surge': 1.3,
+        'delivery_min': 60,
+        # STAGE 2: PRE-BREAKOUT (Last 7 days ONLY)
+        'dryup_max': 0.65,
+        'compression_max': 4.0,
+        'near_high_min': 95.0,
         'expected_return': 5.15,
         'win_rate': 80.0
     },
     'MID': {
-        'price_limit': 10,
-        'vol_surge': 1.2,
-        'delivery_min': 60,
-        'dryup_max': 0.45,
-        'compression_max': 4.0,
-        'atr_max': 3.5,
+        'price_limit': 8,
+        'vol_surge': 1.5,
+        'delivery_min': 55,
+        'dryup_max': 0.60,
+        'compression_max': 5.0,
+        'near_high_min': 94.0,
         'expected_return': 7.02,
         'win_rate': 90.9
     },
     'SMALL': {
-        'price_limit': 8,
-        'vol_surge': 2.2,
-        'delivery_min': 55,
-        'dryup_max': 0.35,
-        'compression_max': 4.5,
-        'atr_max': 4.0,
+        'price_limit': 10,
+        'vol_surge': 1.8,
+        'delivery_min': 50,
+        'dryup_max': 0.55,
+        'compression_max': 6.0,
+        'near_high_min': 93.0,
         'expected_return': 8.46,
         'win_rate': 83.3
     },
     'MICRO': {
-        'price_limit': 10,
-        'vol_surge': 1.6,
-        'delivery_min': 50,
-        'dryup_max': 0.40,
-        'compression_max': 3.5,
-        'atr_max': 5.0,
+        'price_limit': 12,
+        'vol_surge': 2.0,
+        'delivery_min': 45,
+        'dryup_max': 0.50,
+        'compression_max': 7.0,
+        'near_high_min': 92.0,
         'expected_return': 9.13,
         'win_rate': 88.9
     }
 }
 
 # ============================================
-# NIFTY 750 SYMBOLS (HARDCODED)
+# NIFTY 750 SYMBOLS (Complete)
 # ============================================
 
 LARGE_CAP_SYMBOLS = [
@@ -229,7 +227,6 @@ print(f"✅ Loaded {len(ALL_SYMBOLS)} stocks")
 def send_telegram_message(message):
     """Send message to Telegram"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
-        print("⚠️ Telegram not configured")
         return False
     
     success = 0
@@ -245,27 +242,6 @@ def send_telegram_message(message):
     
     return success > 0
 
-def format_stock_message(stock, segment, price, params, metrics):
-    """Format message for a single stock"""
-    expected_return = OPTIMAL_PARAMETERS[segment]['expected_return']
-    win_rate = OPTIMAL_PARAMETERS[segment]['win_rate']
-    
-    message = f"""
-<b>{stock}</b> | {segment} CAP
-💰 LTP: ₹{price:.2f}
-📈 Volume Surge: {metrics.get('vol_surge', 'N/A')}x
-📦 Delivery: {metrics.get('delivery', 'N/A')}%
-🎯 Expected 20d Return: +{expected_return}%
-🏆 Historical Win Rate: {win_rate}%
-
-📊 Filters Passed:
-   • Price Change: ±{params['price_limit']}%
-   • Volume Surge: >{params['vol_surge']}x
-   • Delivery: >{params['delivery_min']}%
-   • Volume Dry-up: <{params['dryup_max']}x
-"""
-    return message
-
 # ============================================
 # FETCH LATEST BHAVCOPY
 # ============================================
@@ -275,11 +251,10 @@ def fetch_latest_bhavcopy():
     try:
         from nselib import capital_market
         
-        # Get yesterday's date (or latest trading day)
         today = dt.date.today()
         for days_back in range(1, 5):
             check_date = today - relativedelta(days=days_back)
-            if check_date.weekday() >= 5:  # Skip weekend
+            if check_date.weekday() >= 5:
                 continue
             
             date_str = check_date.strftime('%d-%m-%Y')
@@ -291,89 +266,248 @@ def fetch_latest_bhavcopy():
                 print(f"✅ Fetched {len(df)} rows")
                 return df, check_date
         
-        print("❌ No data found for last 5 days")
+        print("❌ No data found")
         return None, None
         
     except Exception as e:
-        print(f"Error fetching bhavcopy: {e}")
+        print(f"Error: {e}")
         return None, None
 
 # ============================================
-# PROCESS BHAVCOPY DATA
+# TWO-STAGE SCREENING (Corrected time windows)
 # ============================================
 
-def process_bhavcopy(df, trade_date):
-    """Process bhavcopy and identify signals"""
-    
-    print(f"\n📊 Processing {len(df)} rows...")
-    
-    # Clean and filter
-    df.columns = df.columns.str.upper().str.strip()
-    
-    # Filter EQ series and our symbols
-    df = df[df['SERIES'] == 'EQ']
-    df = df[df['SYMBOL'].isin(ALL_SYMBOLS)]
-    
-    if len(df) == 0:
-        print("No matching symbols found")
-        return []
-    
-    # Extract required columns
-    result_df = pd.DataFrame()
-    result_df['SYMBOL'] = df['SYMBOL'].astype(str).str.strip().str.upper()
-    result_df['CLOSE'] = pd.to_numeric(df['CLOSE_PRICE'], errors='coerce')
-    result_df['VOLUME'] = pd.to_numeric(df['TTL_TRD_QNTY'], errors='coerce')
-    result_df['DELIVERY'] = pd.to_numeric(df['DELIV_PER'], errors='coerce')
-    result_df['HIGH'] = pd.to_numeric(df['HIGH_PRICE'], errors='coerce')
-    result_df['LOW'] = pd.to_numeric(df['LOW_PRICE'], errors='coerce')
-    result_df['OPEN'] = pd.to_numeric(df['OPEN_PRICE'], errors='coerce')
-    result_df['DATE'] = trade_date
-    
-    # Add segment
-    result_df['SEGMENT'] = result_df['SYMBOL'].map(SYMBOL_TO_SEGMENT)
-    
-    # Remove invalid rows
-    result_df = result_df[result_df['CLOSE'].notna()]
-    result_df = result_df[result_df['VOLUME'].notna()]
-    result_df = result_df[result_df['SEGMENT'].notna()]
-    
-    print(f"✅ Processed {len(result_df)} stocks")
-    
-    # Get historical data from DuckDB for metrics
-    signals = []
-    
-    for segment, params in OPTIMAL_PARAMETERS.items():
-        segment_df = result_df[result_df['SEGMENT'] == segment]
+def calculate_two_stage_metrics(symbol, trade_date, params):
+    """
+    CORRECTED LOGIC:
+    - STAGE 1 (Accumulation): Days -55 to -8 (excludes last 7 days)
+    - STAGE 2 (Pre-Breakout): Last 7 days ONLY
+    """
+    try:
+        if not os.path.exists(DB_FILE):
+            return None
         
-        if len(segment_df) == 0:
+        con = duckdb.connect(DB_FILE)
+        
+        # Get data for the stock
+        query = f"""
+            SELECT 
+                DATE,
+                CLOSE,
+                VOLUME,
+                DELIVERY,
+                ROW_NUMBER() OVER (ORDER BY DATE DESC) as rn_desc
+            FROM bhavcopy
+            WHERE SYMBOL = '{symbol}'
+            ORDER BY DATE
+        """
+        
+        df = con.execute(query).fetchdf()
+        con.close()
+        
+        if len(df) < 55:
+            return None
+        
+        # Split data into two periods
+        # Last 7 days = Pre-Breakout window
+        # Days before that = Accumulation window
+        
+        total_rows = len(df)
+        pre_breakout_data = df.iloc[-7:].copy()  # Last 7 days
+        accumulation_data = df.iloc[:-7].copy()  # Days -55 to -8
+        
+        if len(accumulation_data) < 30:
+            return None
+        
+        # ============================================
+        # STAGE 1: ACCUMULATION (Days -55 to -8)
+        # ============================================
+        
+        # 1.1 Price change over 20 days (within accumulation data)
+        if len(accumulation_data) >= 21:
+            price_20d_ago = accumulation_data['CLOSE'].iloc[-21]
+            current_price_acc = accumulation_data['CLOSE'].iloc[-1]
+            price_change = ((current_price_acc - price_20d_ago) / price_20d_ago) * 100
+        else:
+            return None
+        
+        if abs(price_change) > params['price_limit']:
+            return None
+        
+        # 1.2 Volume surge (7d vs prev 28d) within accumulation data
+        if len(accumulation_data) >= 35:
+            last_7_vol = accumulation_data['VOLUME'].iloc[-7:].mean()
+            prev_28_vol = accumulation_data['VOLUME'].iloc[-35:-7].mean()
+            vol_surge = last_7_vol / prev_28_vol if prev_28_vol > 0 else 1
+        else:
+            return None
+        
+        if vol_surge < params['vol_surge']:
+            return None
+        
+        # 1.3 Delivery rising trend within accumulation data
+        if len(accumulation_data) >= 10:
+            last_5_delivery = accumulation_data['DELIVERY'].iloc[-5:].mean()
+            prev_5_delivery = accumulation_data['DELIVERY'].iloc[-10:-5].mean()
+        else:
+            return None
+        
+        if last_5_delivery <= prev_5_delivery:
+            return None
+        
+        if last_5_delivery < params['delivery_min']:
+            return None
+        
+        # ============================================
+        # STAGE 2: PRE-BREAKOUT (Last 7 days ONLY)
+        # ============================================
+        
+        if len(pre_breakout_data) < 5:
+            return None
+        
+        # 2.1 Volume Dry-up (5d vs 20d) - using last 5 days vs 20 days before pre-breakout
+        vol_5d = pre_breakout_data['VOLUME'].mean()
+        vol_20d_history = df['VOLUME'].iloc[-27:-7].mean() if len(df) >= 27 else vol_5d
+        vol_dryup = vol_5d / vol_20d_history if vol_20d_history > 0 else 1
+        
+        if vol_dryup > params['dryup_max']:
+            return None
+        
+        # 2.2 Tight Range (last 10 days, mostly pre-breakout period)
+        high_10d = df['CLOSE'].iloc[-10:].max()
+        low_10d = df['CLOSE'].iloc[-10:].min()
+        current_price = pre_breakout_data['CLOSE'].iloc[-1]
+        range_pct = ((high_10d - low_10d) / current_price) * 100 if current_price > 0 else 0
+        
+        if range_pct > params['compression_max']:
+            return None
+        
+        # 2.3 Near Breakout (20-day high from before pre-breakout)
+        high_20d = df['CLOSE'].iloc[-27:-7].max() if len(df) >= 27 else current_price
+        near_high_pct = (current_price / high_20d) * 100 if high_20d > 0 else 0
+        
+        if near_high_pct < params['near_high_min']:
+            return None
+        
+        # 2.4 Delivery holding (current delivery)
+        current_delivery = pre_breakout_data['DELIVERY'].iloc[-1]
+        
+        # ============================================
+        # CALCULATE QUALITY SCORE
+        # ============================================
+        
+        score = 0
+        if vol_surge >= params['vol_surge'] * 1.2: score += 1
+        if vol_dryup <= params['dryup_max'] * 0.8: score += 1
+        if near_high_pct >= 98: score += 1
+        if range_pct <= 3: score += 1
+        if current_delivery >= params['delivery_min'] + 10: score += 1
+        
+        return {
+            'price_change': round(price_change, 2),
+            'vol_surge': round(vol_surge, 2),
+            'vol_dryup': round(vol_dryup, 2),
+            'delivery_acc': round(last_5_delivery, 1),
+            'delivery_current': round(current_delivery, 1),
+            'near_high_pct': round(near_high_pct, 1),
+            'range_pct': round(range_pct, 2),
+            'quality_score': score
+        }
+        
+    except Exception as e:
+        print(f"  Error for {symbol}: {e}")
+        return None
+
+# ============================================
+# PROCESS ALL STOCKS
+# ============================================
+
+def process_all_stocks(trade_date):
+    """Process all stocks and return signals"""
+    
+    print(f"\n📊 Screening {len(ALL_SYMBOLS)} stocks...")
+    
+    all_signals = []
+    processed = 0
+    
+    for symbol in ALL_SYMBOLS:
+        segment = SYMBOL_TO_SEGMENT.get(symbol)
+        if not segment:
             continue
         
-        print(f"\n🔍 Screening {segment} CAP: {len(segment_df)} stocks")
+        params = OPTIMAL_PARAMETERS[segment]
+        metrics = calculate_two_stage_metrics(symbol, trade_date, params)
         
-        # For each stock, we need historical data to calculate metrics
-        # Since we don't have full historical in daily run, we use today's data only
-        # For production, you would query historical database
+        if metrics:
+            all_signals.append({
+                'SYMBOL': symbol,
+                'SEGMENT': segment,
+                'LTP': round(metrics.get('current_price', 0), 2),
+                'PRICE_CHANGE': metrics['price_change'],
+                'VOL_SURGE': metrics['vol_surge'],
+                'VOL_DRYUP': metrics['vol_dryup'],
+                'DELIVERY_ACC': metrics['delivery_acc'],
+                'DELIVERY_CUR': metrics['delivery_current'],
+                'NEAR_HIGH': metrics['near_high_pct'],
+                'RANGE': metrics['range_pct'],
+                'SCORE': metrics['quality_score'],
+                'EXP_RETURN': params['expected_return'],
+                'WIN_RATE': params['win_rate']
+            })
         
-        # Simplified: Use today's delivery and volume as primary filters
-        for _, row in segment_df.iterrows():
-            # Apply filters based on today's data
-            # Note: Full historical metrics require database access
-            # This is a simplified daily screener
-            
-            if row['DELIVERY'] >= params['delivery_min']:
-                signals.append({
-                    'SYMBOL': row['SYMBOL'],
-                    'SEGMENT': segment,
-                    'LTP': round(row['CLOSE'], 2),
-                    'DELIVERY': round(row['DELIVERY'], 1),
-                    'VOLUME': int(row['VOLUME']),
-                    'DATE': trade_date,
-                    'params': params
-                })
-        
-        print(f"   Found {len([s for s in signals if s['SEGMENT'] == segment])} signals")
+        processed += 1
+        if processed % 100 == 0:
+            print(f"   Processed {processed}/{len(ALL_SYMBOLS)} stocks...")
     
-    return signals
+    # Sort by score
+    all_signals.sort(key=lambda x: x['SCORE'], reverse=True)
+    
+    print(f"\n✅ Found {len(all_signals)} total signals")
+    
+    # Breakdown by segment
+    for segment in ['LARGE', 'MID', 'SMALL', 'MICRO']:
+        count = len([s for s in all_signals if s['SEGMENT'] == segment])
+        print(f"   {segment}: {count} signals")
+    
+    return all_signals
+
+# ============================================
+# FORMAT SINGLE REPORT MESSAGE
+# ============================================
+
+def format_report_message(signals, trade_date):
+    """Format single message with top 5 per segment"""
+    
+    message = f"""
+🚀 <b>NIFTY 750 SMART MONEY SCREENER</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📅 Date: {trade_date.strftime('%d-%b-%Y')}
+📊 Total Signals: {len(signals)}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+"""
+    
+    for segment in ['LARGE', 'MID', 'SMALL', 'MICRO']:
+        segment_signals = [s for s in signals if s['SEGMENT'] == segment][:5]
+        
+        if segment_signals:
+            message += f"\n<b>🔥 {segment} CAP</b>\n"
+            message += f"┌─────┬──────────────┬──────────┬────────┬────────┬────────┐\n"
+            message += f"│ #   │ STOCK        │ LTP      │ SURGE  │ DRYUP  │ NEAR%  │\n"
+            message += f"├─────┼──────────────┼──────────┼────────┼────────┼────────┤\n"
+            
+            for idx, s in enumerate(segment_signals, 1):
+                emoji = "⭐" * s['SCORE'] if s['SCORE'] > 0 else "•"
+                message += f"│ {idx:<3} │ {s['SYMBOL']:<12} │ ₹{s['LTP']:<8.2f} │ {s['VOL_SURGE']:.1f}x    │ {s['VOL_DRYUP']:.2f}x   │ {s['NEAR_HIGH']:.0f}%    │\n"
+            
+            message += f"└─────┴──────────────┴──────────┴────────┴────────┴────────┘\n"
+    
+    message += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    message += f"📈 Expected 20-day Return: +5-9% | Win Rate: 80-90%\n"
+    message += f"⏰ {dt.datetime.now().strftime('%d-%b-%Y %H:%M:%S')}\n"
+    message += f"⚠️ Always use stop loss. Do your own research."
+    
+    return message
 
 # ============================================
 # MAIN FUNCTION
@@ -383,13 +517,15 @@ def main():
     print("=" * 60)
     print("🚀 NIFTY 750 SMART MONEY SCREENER")
     print("=" * 60)
+    print("✅ Accumulation: Days -55 to -8")
+    print("✅ Pre-Breakout: Last 7 days ONLY")
+    print("=" * 60)
     print(f"Time: {dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     
     # Check Telegram configuration
     if not TELEGRAM_BOT_TOKEN:
         print("❌ TELEGRAM_BOT_TOKEN not set!")
-        print("   Please add it to GitHub Secrets")
         return
     
     if not TELEGRAM_CHAT_IDS:
@@ -398,82 +534,46 @@ def main():
     
     print(f"✅ Telegram configured for {len(TELEGRAM_CHAT_IDS)} chat(s)")
     
-    # Fetch latest bhavcopy
-    df, trade_date = fetch_latest_bhavcopy()
-    
-    if df is None:
-        print("❌ Failed to fetch data")
-        send_telegram_message("🔴 NIFTY Screener failed: Unable to fetch data from NSE")
+    # Check if database exists
+    if not os.path.exists(DB_FILE):
+        print(f"❌ Database not found: {DB_FILE}")
+        print("   Please build the database first")
+        send_telegram_message("🔴 NIFTY Screener failed: Database not found")
         return
     
-    # Process data
-    signals = process_bhavcopy(df, trade_date)
+    # Get trade date
+    trade_date = dt.date.today()
+    for days_back in range(1, 5):
+        check_date = trade_date - relativedelta(days=days_back)
+        if check_date.weekday() < 5:
+            trade_date = check_date
+            break
     
-    # Prepare and send results
-    if len(signals) == 0:
+    # Process all stocks
+    signals = process_all_stocks(trade_date)
+    
+    # Send single report message
+    if signals:
+        message = format_report_message(signals, trade_date)
+        send_telegram_message(message)
+        print(f"\n✅ Sent report with {len(signals)} signals")
+    else:
         message = f"""
 🔴 <b>NIFTY 750 SCREENER RESULTS</b>
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📅 Date: {trade_date.strftime('%d-%b-%Y')}
 ❌ <b>NO STOCKS FOUND</b>
 
-No stocks passed the filters today.
-⏰ {dt.datetime.now().strftime('%H:%M:%S')}
+No stocks passed both stages:
+- Stage 1: Accumulation (Days -55 to -8)
+- Stage 2: Pre-Breakout (Last 7 days ONLY)
+
+⏰ {dt.datetime.now().strftime('%d-%b-%Y %H:%M:%S')}
 """
         send_telegram_message(message)
         print("No signals found")
-        return
     
-    # Group by segment
-    signals_by_segment = {}
-    for s in signals:
-        seg = s['SEGMENT']
-        if seg not in signals_by_segment:
-            signals_by_segment[seg] = []
-        signals_by_segment[seg].append(s)
-    
-    # Build summary message
-    summary = f"""
-🚀 <b>NIFTY 750 SMART MONEY SCREENER</b>
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📅 Date: {trade_date.strftime('%d-%b-%Y')}
-📊 Total Signals: {len(signals)}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-"""
-    
-    for segment, sigs in signals_by_segment.items():
-        params = OPTIMAL_PARAMETERS[segment]
-        summary += f"\n<b>{segment} CAP</b> ({len(sigs)} signals)\n"
-        summary += f"   Expected Return: +{params['expected_return']}% | Win Rate: {params['win_rate']}%\n"
-        for s in sigs[:3]:  # Top 3 per segment
-            summary += f"   • {s['SYMBOL']} | ₹{s['LTP']:.2f} | Delivery: {s['DELIVERY']}%\n"
-    
-    summary += "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    summary += f"⏰ {dt.datetime.now().strftime('%d-%b-%Y %H:%M:%S')}\n"
-    summary += "⚠️ Always use stop loss. Do your own research."
-    
-    # Send summary
-    send_telegram_message(summary)
-    
-    # Send individual alerts for top signals
-    all_signals = sorted(signals, key=lambda x: x['DELIVERY'], reverse=True)
-    for signal in all_signals[:10]:
-        params = signal['params']
-        detail = f"""
-<b>{signal['SYMBOL']}</b> | {signal['SEGMENT']} CAP
-💰 LTP: ₹{signal['LTP']:.2f}
-📦 Delivery: {signal['DELIVERY']}%
-📈 Volume: {signal['VOLUME']:,}
-🎯 Expected 20d Return: +{params['expected_return']}%
-🏆 Historical Win Rate: {params['win_rate']}%
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-        send_telegram_message(detail)
-        time.sleep(1)  # Avoid rate limiting
-    
-    print(f"\n✅ Sent {len(signals)} signals to Telegram")
-    print("=" * 60)
+    print("\n" + "=" * 60)
     print("✅ SCREENER COMPLETE")
     print("=" * 60)
 
