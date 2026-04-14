@@ -8,27 +8,35 @@ import pandas as pd
 from datetime import datetime
 
 # ============================================
-# CONFIGURATION - SET YOUR TELEGRAM CREDENTIALS
+# CONFIGURATION - READ FROM GITHUB SECRETS
 # ============================================
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
-TELEGRAM_CHAT_IDS = os.environ.get("TELEGRAM_CHAT_IDS", "YOUR_CHAT_ID_HERE").split(',')
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_IDS = os.environ.get("TELEGRAM_CHAT_IDS", "")
 
 def send_telegram_message(message):
     """Send message to all configured Telegram chats"""
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ Telegram bot token not configured")
+    if not TELEGRAM_BOT_TOKEN:
+        print("❌ TELEGRAM_BOT_TOKEN not configured")
+        print("   Add it to GitHub Secrets: Settings → Secrets → Actions")
+        return False
+    
+    if not TELEGRAM_CHAT_IDS:
+        print("❌ TELEGRAM_CHAT_IDS not configured")
+        return False
+    
+    chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_IDS.split(',') if cid.strip()]
+    
+    if not chat_ids:
+        print("❌ No valid chat IDs found")
         return False
     
     success_count = 0
-    for chat_id in TELEGRAM_CHAT_IDS:
-        if not chat_id or chat_id == "YOUR_CHAT_ID_HERE":
-            continue
-        
+    for chat_id in chat_ids:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
-                'chat_id': chat_id.strip(),
+                'chat_id': chat_id,
                 'text': message,
                 'parse_mode': 'HTML'
             }
@@ -47,42 +55,50 @@ def format_alert_message(results_df, trade_date):
     """Format the alert message for Telegram"""
     
     tier1 = results_df[results_df['tier1'] == True].head(5)
-    tier2 = results_df[(results_df['coil_score'] >= 70) & (results_df['tier1'] == False)].head(10)
+    top_delivery = results_df.nlargest(5, 'delivery_delta')
     
     message = f"""
-🚀 <b>COIL-ANOMALY v3.0 - DAILY SCAN</b>
-📅 {trade_date.strftime('%d-%b-%Y')}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚀 COIL-ANOMALY | {trade_date.strftime('%d-%b-%Y')}
+━━━━━━━━━━━━━━━━━━━━━━━━━
 """
     
     if len(tier1) > 0:
-        message += f"\n🔥 <b>TIER 1 SIGNALS (CEPS ≥ 85)</b>\n"
+        message += f"\n🔥 TIER 1 SIGNALS\n"
         for _, row in tier1.iterrows():
-            message += f"\n<b>{row['symbol']}</b> | {row['segment']}\n"
-            message += f"   CEPS: {row['coil_score']:.0f} | LTP: ₹{row['current_price']:.0f}\n"
-            message += f"   Delivery Delta: {row['delivery_delta']:.2f}x\n"
-            message += f"   BB %ile: {row['bb_percentile']:.0f}th | ATR: {row['atr_contraction']:.2f}\n"
-            message += f"   Trigger: ₹{row['trigger_level']:.0f} | Invalidate: ₹{row['invalidation_level']:.0f}\n"
-    else:
-        message += f"\n⚠️ No Tier 1 signals found\n"
+            atr_pct = (1 - row['atr_contraction']) * 100
+            message += f"\n{row['symbol']} - ₹{row['current_price']:.0f}-{row['segment']}CAP"
+            message += f"\n   Delivery Delta: {row['delivery_delta']:.2f}x"
+            
+            if row['bb_percentile'] < 10:
+                bb_text = f"{row['bb_percentile']:.0f}th %ile (Extreme compression)"
+            elif row['bb_percentile'] < 25:
+                bb_text = f"{row['bb_percentile']:.0f}th %ile (Compressed)"
+            else:
+                bb_text = f"{row['bb_percentile']:.0f}th %ile"
+            
+            message += f"\n   BB Width: {bb_text}"
+            message += f"\n   ATR: {row['atr_contraction']:.2f} (Contracted {atr_pct:.0f}%)"
+            message += f"\n   20D Chg: {row['price_change_pct']:+.1f}%"
+            message += f"\n   Trigger: ₹{row['trigger_level']:.0f} | Invalidate: ₹{row['invalidation_level']:.0f}"
     
-    if len(tier2) > 0:
-        message += f"\n📊 <b>TIER 2 SIGNALS (CEPS 70-84)</b>\n"
-        for _, row in tier2.iterrows():
-            message += f"\n<b>{row['symbol']}</b> | {row['segment']}\n"
-            message += f"   CEPS: {row['coil_score']:.0f} | LTP: ₹{row['current_price']:.0f}\n"
-            message += f"   Delivery Delta: {row['delivery_delta']:.2f}x | BB: {row['bb_percentile']:.0f}th\n"
+    message += f"\n\n🔥 STEALTH ACCUMULATION LEADERS\n"
     
-    # Top 5 by delivery delta (stealth accumulation)
-    top_delivery = results_df.nlargest(5, 'delivery_delta')
-    message += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    message += f"<b>🔥 STEALTH ACCUMULATION LEADERS</b>\n"
     for _, row in top_delivery.iterrows():
-        message += f"   {row['symbol']}: {row['delivery_delta']:.2f}x | {row['price_change_pct']:+.1f}%\n"
-    
-    message += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    message += f"📊 Total signals: {len(results_df)}\n"
-    message += f"<i>Invalidate on close below given levels</i>"
+        atr_pct = (1 - row['atr_contraction']) * 100
+        message += f"\n{row['symbol']} - ₹{row['current_price']:.0f}-{row['segment']}CAP"
+        message += f"\n   Delivery Delta: {row['delivery_delta']:.2f}x"
+        
+        if row['bb_percentile'] < 10:
+            bb_text = f"{row['bb_percentile']:.0f}th %ile (Extreme compression)"
+        elif row['bb_percentile'] < 25:
+            bb_text = f"{row['bb_percentile']:.0f}th %ile (Compressed)"
+        else:
+            bb_text = f"{row['bb_percentile']:.0f}th %ile"
+        
+        message += f"\n   BB Width: {bb_text}"
+        message += f"\n   ATR: {row['atr_contraction']:.2f} (Contracted {atr_pct:.0f}%)"
+        message += f"\n   20D Chg: {row['price_change_pct']:+.1f}%"
+        message += f"\n   Trigger: ₹{row['trigger_level']:.0f} | Invalidate: ₹{row['invalidation_level']:.0f}"
     
     return message
 
