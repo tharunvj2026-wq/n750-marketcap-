@@ -2,9 +2,8 @@ name: Daily COIL Scan
 
 on:
   schedule:
-    # Runs at 6:00 AM IST (convert to UTC: 00:30 UTC)
     - cron: '30 0 * * 1-5'
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 jobs:
   scan:
@@ -21,14 +20,16 @@ jobs:
         
     - name: Install dependencies
       run: |
-        pip install -r requirements.txt
+        pip install nselib pandas numpy scipy requests python-dateutil
         
     - name: Run COIL Analysis
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
       run: |
-        python main.py
+        python cell2_build_db.py
+        python cell3_coil_analysis.py
+        python cell4_telegram_alert.py
         
     - name: Upload results
       uses: actions/upload-artifact@v4
