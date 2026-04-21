@@ -1,5 +1,5 @@
 # ============================================
-# CELL 3+4 MERGED: COIL ANALYSIS + TELEGRAM ALERT (FIXED)
+# CELL 3+4 MERGED: COIL ANALYSIS + TELEGRAM ALERT (SEGMENT-WISE THRESHOLDS)
 # Run this after cell2_build_db.py
 # ============================================
 
@@ -16,22 +16,50 @@ warnings.filterwarnings('ignore')
 from cell1_marketcap import SYMBOL_TO_SEGMENT
 
 # ============================================
-# CONFIGURATION - HIGH THRESHOLDS (REAL ACCUMULATION)
+# CONFIGURATION - SEGMENT-WISE THRESHOLDS
 # ============================================
 
 PRICE_LIMITS = {
     'LARGE': 4,
-    'MID': 6,
-    'SMALL': 7,
+    'MID': 7,
+    'SMALL': 6,
     'MICRO': 8
 }
 
+# Segment-wise accumulation thresholds
 ACCUMULATION_THRESHOLDS = {
-    'delivery_5d_min': 50,        # Delivery must be >50%
-    'volume_spike_min': 1.3,      # Volume must be rising >1.3x
-    'delivery_delta_min': 1.2,    # Delivery rising faster than volume
-    'price_range_5d_max': 5,      # Price range <5% (coiled)
-    'atr_contraction_max': 0.78   # ATR contracted >22%
+    'LARGE': {
+        'delivery_5d_min': 55,
+        'volume_spike_min': 1.3,
+        'price_range_5d_max': 4,
+        'atr_contraction_max': 0.78
+    },
+    'MID': {
+        'delivery_5d_min': 50,
+        'volume_spike_min': 1.5,
+        'price_range_5d_max': 7,
+        'atr_contraction_max': 0.78
+    },
+    'SMALL': {
+        'delivery_5d_min': 45,
+        'volume_spike_min': 1.7,
+        'price_range_5d_max': 6,
+        'atr_contraction_max': 0.78
+    },
+    'MICRO': {
+        'delivery_5d_min': 50,
+        'volume_spike_min': 2.0,
+        'price_range_5d_max': 8,
+        'atr_contraction_max': 0.78
+    }
+}
+
+# Default fallback (if segment not found)
+DEFAULT_THRESHOLDS = {
+    'delivery_5d_min': 50,
+    'volume_spike_min': 1.5,
+    'price_range_5d_max': 6,
+    'atr_contraction_max': 0.78
 }
 
 # TELEGRAM CONFIGURATION
@@ -43,7 +71,7 @@ TELEGRAM_CHAT_IDS = os.environ.get("TELEGRAM_CHAT_IDS", "")
 # ============================================
 
 def calculate_delivery_delta(stock_df):
-    """CORRECTED: Delivery Delta = (5d Del / 20d Del) / (5d Vol / 20d Vol)
+    """Delivery Delta = (5d Del / 20d Del) / (5d Vol / 20d Vol)
     Only valid when volume is NOT falling"""
     if len(stock_df) < 40:
         return 0, 0, 0, 0, 0
@@ -141,11 +169,17 @@ def calculate_atr_contraction(stock_df):
     contraction = atr_5d / atr_20d if atr_20d > 0 else 1
     return contraction, atr_5d, atr_20d
 
+def get_thresholds(segment):
+    """Get accumulation thresholds for given segment"""
+    return ACCUMULATION_THRESHOLDS.get(segment, DEFAULT_THRESHOLDS)
+
 def analyze_symbol(stock_df, symbol, segment):
-    """Complete analysis - ONLY returns TRUE accumulation stocks"""
+    """Complete analysis with segment-wise thresholds"""
     
     if stock_df is None or len(stock_df) < 50:
         return None
+    
+    thresholds = get_thresholds(segment)
     
     # Calculate all metrics
     delivery_delta, d5, d20, v5, v20 = calculate_delivery_delta(stock_df)
@@ -156,36 +190,35 @@ def analyze_symbol(stock_df, symbol, segment):
     atr_contraction, atr_5d, atr_20d = calculate_atr_contraction(stock_df)
     
     # ============================================
-    # HARD FILTERS - TRUE ACCUMULATION ONLY
+    # SEGMENT-WISE HARD FILTERS
     # ============================================
     
-    # Filter 1: Price must be in range
+    # Filter 1: Price must be in range (20-day change)
     if not price_valid:
         return None
     
-    # Filter 2: Delivery must be >50% (institutional)
-    if d5 < ACCUMULATION_THRESHOLDS['delivery_5d_min']:
+    # Filter 2: Delivery must be above segment threshold
+    if d5 < thresholds['delivery_5d_min']:
         return None
     
-    # Filter 3: Volume must be rising (>1.3x)
-    if volume_spike < ACCUMULATION_THRESHOLDS['volume_spike_min']:
+    # Filter 3: Volume spike must meet segment threshold
+    if volume_spike < thresholds['volume_spike_min']:
         return None
     
-    # Filter 4: Delivery Delta must show accumulation
-    if delivery_delta < ACCUMULATION_THRESHOLDS['delivery_delta_min']:
+    # Filter 4: Delivery Delta must show accumulation (>1.2x for all)
+    if delivery_delta < 1.2:
         return None
     
-    # Filter 5: Price range must be tight (<5%)
-    if price_range > ACCUMULATION_THRESHOLDS['price_range_5d_max']:
+    # Filter 5: Price range must be tight (segment-wise)
+    if price_range > thresholds['price_range_5d_max']:
         return None
     
-    # Filter 6: ATR must be contracting
-    if atr_contraction > ACCUMULATION_THRESHOLDS['atr_contraction_max']:
+    # Filter 6: ATR must be contracting (same for all segments as you said you don't know)
+    if atr_contraction > thresholds['atr_contraction_max']:
         return None
     
-    # Calculate score (only for ranking)
-    # Higher delivery delta = stronger accumulation
-    coil_score = delivery_delta * 10
+    # Calculate score (delivery_delta * volume_spike) for ranking
+    coil_score = delivery_delta * volume_spike * 10
     
     high_5d = stock_df['HIGH'].iloc[-5:].max()
     low_5d = stock_df['LOW'].iloc[-5:].min()
@@ -240,65 +273,40 @@ def send_telegram_message(message):
             if response.status_code == 200:
                 success_count += 1
                 print(f"✅ Message sent to {chat_id}")
+            else:
+                print(f"❌ Failed to send to {chat_id}: {response.status_code}")
         except Exception as e:
             print(f"❌ Error sending to {chat_id}: {e}")
     
     return success_count > 0
 
 def format_alert_message(results_df, trade_date):
-    """Format the alert message for Telegram"""
+    """Format the alert message for Telegram (minimal format)"""
     
     if len(results_df) == 0:
-        return f"""🚀 COIL-ANOMALY | {trade_date.strftime('%d-%b-%Y')}
+        return f"""🔍 COIL SCAN | {trade_date.strftime('%d-%b-%Y')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
-⚠️ NO ACCUMULATION SIGNALS
+⚠️ NO STOCKS FOUND
 
-Requirements not met:
-• Delivery > 50%
-• Volume Spike > 1.3x
-• Price Range < 5%
-• ATR Contraction < 0.78
+No stocks met segment-wise criteria:
+• LARGE: Del>55%, Vol>1.3x, Range<4%
+• MID: Del>50%, Vol>1.5x, Range<7%
+• SMALL: Del>45%, Vol>1.7x, Range<6%
+• MICRO: Del>50%, Vol>2.0x, Range<8%
+• ATR contraction <0.78 for all
 
-Waiting for institutional participation."""
+Waiting for setup."""
     
-    top_stocks = results_df.head(5)
-    
-    message = f"""🚀 COIL-ANOMALY | {trade_date.strftime('%d-%b-%Y')}
+    # Minimal format - one line per stock
+    message = f"""🎯 COIL SIGNALS | {trade_date.strftime('%d-%b-%Y')}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
-🔥 TRUE ACCUMULATION SIGNALS
-
 """
     
-    for idx, (_, row) in enumerate(top_stocks.iterrows()):
-        atr_pct = (1 - row['atr_contraction']) * 100
-        
-        if row['bb_percentile'] < 10:
-            bb_text = f"{row['bb_percentile']:.0f}th %ile (Extreme compression)"
-        elif row['bb_percentile'] < 25:
-            bb_text = f"{row['bb_percentile']:.0f}th %ile (Compressed)"
-        else:
-            bb_text = f"{row['bb_percentile']:.0f}th %ile"
-        
-        if idx == 0:
-            # First stock - full details
-            message += f"""*{row['symbol']}* - ₹{row['current_price']:.0f} - {row['segment']}CAP
-   Delivery Delta: {row['delivery_delta']:.2f}x
-   Delivery%: {row['delivery_5d']:.0f}% (5D) | {row['delivery_20d']:.0f}% (20D)
-   Volume Spike: {row['volume_spike']:.1f}x (5D vs 20D)
-   Price Range: {row['price_range_5d']:.1f}% (5D)
-   BB Width: {bb_text}
-   ATR: {row['atr_contraction']:.2f} (Contracted {atr_pct:.0f}%)
-   20D Chg: {row['price_change_pct']:+.1f}%
-
-"""
-        else:
-            # Remaining stocks - compact format
-            message += f"""*{row['symbol']}* - ₹{row['current_price']:.0f} - {row['segment']}CAP
-   DD:{row['delivery_delta']:.2f}x | Del:{row['delivery_5d']:.0f}/{row['delivery_20d']:.0f}% | Vol:{row['volume_spike']:.1f}x | Range:{row['price_range_5d']:.1f}% | ATR:{row['atr_contraction']:.2f} | Chg:{row['price_change_pct']:+.1f}%
-
-"""
+    for _, row in results_df.iterrows():
+        # Minimal: Symbol | Segment | Del% | VolSpike | Range% | ATR | Score
+        message += f"*{row['symbol']}* [{row['segment']}] D:{row['delivery_5d']:.0f}% V:{row['volume_spike']:.1f}x R:{row['price_range_5d']:.1f}% ATR:{row['atr_contraction']:.2f} | {row['coil_score']:.1f}\n"
     
     return message
 
@@ -317,12 +325,9 @@ def main():
     print(f"✅ Loaded database: {len(df):,} rows")
     print(f"   Date range: {df['DATE'].min().date()} to {df['DATE'].max().date()}")
     
-    print(f"\n📊 FILTERS (TRUE ACCUMULATION):")
-    print(f"   • Delivery 5D avg > {ACCUMULATION_THRESHOLDS['delivery_5d_min']}%")
-    print(f"   • Volume Spike > {ACCUMULATION_THRESHOLDS['volume_spike_min']}x")
-    print(f"   • Delivery Delta > {ACCUMULATION_THRESHOLDS['delivery_delta_min']}x")
-    print(f"   • 5D Price Range < {ACCUMULATION_THRESHOLDS['price_range_5d_max']}%")
-    print(f"   • ATR Contraction < {ACCUMULATION_THRESHOLDS['atr_contraction_max']}")
+    print(f"\n📊 SEGMENT-WISE FILTERS:")
+    for seg, th in ACCUMULATION_THRESHOLDS.items():
+        print(f"   {seg}: Del>{th['delivery_5d_min']}% | Vol>{th['volume_spike_min']}x | Range<{th['price_range_5d_max']}% | ATR<{th['atr_contraction_max']}")
     
     symbols = df['SYMBOL'].unique()
     print(f"\n📊 Analyzing {len(symbols)} stocks...")
@@ -342,15 +347,22 @@ def main():
     
     if len(results) > 0:
         results_df = pd.DataFrame(results)
-        results_df = results_df.sort_values('delivery_delta', ascending=False)
+        results_df = results_df.sort_values('coil_score', ascending=False)
         results_df.to_csv('coil_analysis_results.csv', index=False)
         print(f"💾 Results saved to 'coil_analysis_results.csv'")
+        print(f"\n📈 Top 5:")
+        for _, row in results_df.head(5).iterrows():
+            print(f"   {row['symbol']} [{row['segment']}] - Score: {row['coil_score']} | Del:{row['delivery_5d']:.0f}% | Vol:{row['volume_spike']:.1f}x")
     else:
         print("💾 No results to save")
         results_df = pd.DataFrame()
     
     # Send Telegram Alert
-    trade_date = datetime.now().date()
+    # Use the latest date from cache as trade date
+    trade_date = df['DATE'].max()
+    if isinstance(trade_date, pd.Timestamp):
+        trade_date = trade_date.date()
+    
     message = format_alert_message(results_df, trade_date)
     send_telegram_message(message)
     print(f"\n✅ Alert sent at {datetime.now().strftime('%H:%M:%S')}")
