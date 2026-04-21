@@ -1,5 +1,5 @@
 # ============================================
-# CELL 4: DAILY SWEEP CANDLE SCANNER
+# CELL 4: DAILY SWEEP CANDLE SCANNER (FIXED ALERT)
 # Condition: Open & Close inside previous body, Low < previous low
 # ============================================
 
@@ -22,8 +22,6 @@ from cell3_coil_analysis import send_telegram_message
 # CONFIGURATION
 # ============================================
 
-# Use cache from cell2 if available, otherwise fetch from yfinance
-USE_CACHE = True
 CACHE_FILE = "nifty750_bhavcopy_cache.csv"
 
 # ============================================
@@ -31,18 +29,15 @@ CACHE_FILE = "nifty750_bhavcopy_cache.csv"
 # ============================================
 
 def is_trading_day(date):
-    """Simple check - weekday"""
     return date.weekday() < 5
 
 def get_previous_trading_day(date):
-    """Get previous trading day (skip weekends)"""
     d = date - timedelta(days=1)
     while not is_trading_day(d):
         d -= timedelta(days=1)
     return d
 
 def get_last_n_trading_dates_including_today(n=2):
-    """Return list of last n trading dates, including today"""
     dates = []
     d = datetime.now().date()
     while len(dates) < n:
@@ -52,22 +47,18 @@ def get_last_n_trading_dates_including_today(n=2):
     return dates
 
 # ============================================
-# DATA FETCHING (from cache or yfinance)
+# DATA FETCHING
 # ============================================
 
 def fetch_from_cache(symbol, target_date):
-    """Fetch data from cell2 cache if available"""
     try:
         if not os.path.exists(CACHE_FILE):
             return None
-        
         df = pd.read_csv(CACHE_FILE, parse_dates=['DATE'])
         df = df[df['SYMBOL'] == symbol]
         df = df[df['DATE'].dt.date == target_date]
-        
         if df.empty:
             return None
-        
         row = df.iloc[0]
         return {
             'open': float(row['OPEN']),
@@ -79,24 +70,19 @@ def fetch_from_cache(symbol, target_date):
         return None
 
 def fetch_from_yfinance(symbol, target_date):
-    """Fetch data from yfinance (fallback)"""
     try:
         import yfinance as yf
         ticker = yf.Ticker(symbol + ".NS")
         start = target_date - timedelta(days=5)
         end = target_date + timedelta(days=1)
         data = ticker.history(start=start, end=end, interval="1d")
-        
         if data.empty:
             return None
-        
         data = data.reset_index()
         data['Date'] = pd.to_datetime(data['Date']).dt.date
         row = data[data['Date'] == target_date]
-        
         if row.empty:
             return None
-        
         return {
             'open': float(row['Open'].iloc[0]),
             'high': float(row['High'].iloc[0]),
@@ -107,38 +93,28 @@ def fetch_from_yfinance(symbol, target_date):
         return None
 
 def fetch_data_for_date(symbol, target_date):
-    """Fetch data from cache first, fallback to yfinance"""
-    # Try cache first
     data = fetch_from_cache(symbol, target_date)
     if data:
         return data
-    
-    # Fallback to yfinance
     return fetch_from_yfinance(symbol, target_date)
 
 # ============================================
-# SWEEP CANDLE CONDITION
+# SWEEP CONDITION
 # ============================================
 
 def is_sweep_candle(current, prev):
-    """Check if current candle is a sweep candle"""
     prev_body_low = min(prev['open'], prev['close'])
     prev_body_high = max(prev['open'], prev['close'])
-    
     open_inside = (current['open'] > prev_body_low) and (current['open'] < prev_body_high)
     close_inside = (current['close'] > prev_body_low) and (current['close'] < prev_body_high)
     low_swept = current['low'] < prev['low']
-    
     return open_inside and close_inside and low_swept
 
 def scan_symbol_for_date(symbol, target_date, prev_date):
-    """Scan a single symbol for sweep candle"""
     current = fetch_data_for_date(symbol, target_date)
     prev = fetch_data_for_date(symbol, prev_date)
-    
     if current is None or prev is None:
         return None
-    
     if is_sweep_candle(current, prev):
         return {
             'symbol': symbol,
@@ -148,16 +124,13 @@ def scan_symbol_for_date(symbol, target_date, prev_date):
     return None
 
 # ============================================
-# TELEGRAM ALERT FORMATTING
+# FIXED TELEGRAM ALERT FORMATTING
 # ============================================
 
-def format_alert_message(results_by_date, trading_dates_desc):
-    """Format minimal Telegram alert message"""
+def format_alert_message(results, latest_date):
+    """Format minimal Telegram alert message - FIXED"""
     
-    total_found = sum(len(candles) for candles in results_by_date.values())
-    latest_date = trading_dates_desc[0].strftime('%d-%b-%Y') if trading_dates_desc else datetime.now().strftime('%d-%b-%Y')
-    
-    if total_found == 0:
+    if not results:
         return f"""🔍 SWEEP DAILY | {latest_date}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -167,34 +140,28 @@ Condition: Open/Close inside previous body, Low < previous low
 
 No stocks met the criteria."""
     
+    # Group by segment
+    segment_order = ['LARGE', 'MID', 'SMALL', 'MICRO']
+    grouped = {seg: [] for seg in segment_order}
+    
+    for r in results:
+        seg = r['segment']
+        if seg in grouped:
+            grouped[seg].append(r)
+    
+    # Build message
     message = f"""🎯 SWEEP DAILY | {latest_date}
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
 """
     
-    segment_order = ['LARGE', 'MID', 'SMALL', 'MICRO']
-    segment_display = {'LARGE': 'LARGE', 'MID': 'MID', 'SMALL': 'SMALL', 'MICRO': 'MICRO'}
+    for seg in segment_order:
+        if grouped[seg]:
+            message += f"\n*{seg}*\n"
+            for r in grouped[seg][:15]:  # Max 15 per segment
+                message += f"   {r['symbol']} ₹{r['price']}\n"
     
-    for date in trading_dates_desc[:1]:  # Only show latest date
-        candles = results_by_date.get(date, [])
-        if not candles:
-            continue
-        
-        # Group by segment
-        grouped = {seg: [] for seg in segment_order}
-        for c in candles:
-            seg = c['segment']
-            if seg in grouped:
-                grouped[seg].append(c)
-        
-        for seg in segment_order:
-            if grouped[seg]:
-                message += f"\n*{segment_display[seg]}*\n"
-                for c in grouped[seg][:10]:  # Max 10 per segment
-                    message += f"   {c['symbol']} ₹{c['price']}\n"
-    
-    if total_found > 0:
-        message += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━\n📊 Total: {total_found} stocks"
+    message += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━\n📊 Total: {len(results)} stocks"
     
     return message
 
@@ -208,27 +175,28 @@ def main():
     print("Condition: Open & Close inside previous body, Low < previous low")
     print("=" * 60)
     
-    # Get last 2 trading dates (including today)
+    # Get last 2 trading dates
     trading_dates = get_last_n_trading_dates_including_today(2)
     trading_dates_desc = sorted(trading_dates, reverse=True)
     
     print(f"\n📅 Last 2 trading days: {[d.strftime('%Y-%m-%d') for d in trading_dates_desc]}")
     
-    # Create date pairs
+    # Create date pairs (today->yesterday, yesterday->day before)
     date_pairs = []
     for date in trading_dates_desc:
         prev = get_previous_trading_day(date)
         date_pairs.append((date, prev))
         print(f"   {date.strftime('%Y-%m-%d')} → previous: {prev.strftime('%Y-%m-%d')}")
     
-    # Prepare all tasks
+    # Prepare tasks
     tasks = [(sym, target, prev) for sym in ALL_SYMBOLS for (target, prev) in date_pairs]
     
     print(f"\n🔍 Scanning {len(ALL_SYMBOLS)} symbols...")
     
-    results_by_date = {date: [] for date in trading_dates_desc}
+    # Collect results for the latest date only (first in desc list)
+    latest_date = trading_dates_desc[0]
+    results = []
     
-    # Scan in parallel
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures = {executor.submit(scan_symbol_for_date, sym, target, prev): (sym, target) 
                    for (sym, target, prev) in tasks}
@@ -238,24 +206,34 @@ def main():
             sym, target = futures[future]
             res = future.result()
             completed += 1
-            
             if completed % 100 == 0:
                 print(f"   Progress: {completed}/{len(tasks)}", end="\r")
-            
-            if res:
-                results_by_date[target].append(res)
+            if res and target == latest_date:  # Only keep latest date results
+                results.append(res)
     
-    print(f"\n   ✅ Scan complete. Found: {sum(len(c) for c in results_by_date.values())} stocks")
+    print(f"\n   ✅ Scan complete. Found: {len(results)} stocks")
+    
+    # Show in console
+    if results:
+        print(f"\n📊 SWEEP CANDLES FOUND ({latest_date.strftime('%Y-%m-%d')}):")
+        for seg in ['LARGE', 'MID', 'SMALL', 'MICRO']:
+            seg_results = [r for r in results if r['segment'] == seg]
+            if seg_results:
+                print(f"\n   {seg}:")
+                for r in seg_results[:5]:
+                    print(f"      {r['symbol']} ₹{r['price']}")
+    else:
+        print("\n📊 No sweep candles found.")
     
     # Send Telegram alert
     print("\n📨 Sending Telegram alert...")
-    message = format_alert_message(results_by_date, trading_dates_desc)
+    message = format_alert_message(results, latest_date.strftime('%d-%b-%Y'))
     send_telegram_message(message)
     
     print(f"\n✅ Alert sent at {datetime.now().strftime('%H:%M:%S')}")
     print("=" * 60)
     
-    return results_by_date
+    return results
 
 if __name__ == "__main__":
     main()
