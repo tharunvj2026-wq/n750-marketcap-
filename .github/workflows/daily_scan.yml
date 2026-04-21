@@ -29,7 +29,6 @@ jobs:
       run: |
         python cell2_build_db.py
         python cell3_coil_analysis.py
-        python cell4_telegram_alert.py
         
     - name: Upload results
       uses: actions/upload-artifact@v4
