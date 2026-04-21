@@ -1,10 +1,11 @@
 # ============================================
-# MAIN ENTRY POINT - RUN FULL PIPELINE
+# MAIN ENTRY POINT - RUN FULL PIPELINE (FIXED)
 # ============================================
 
 import os
 import sys
 from datetime import datetime
+import pandas as pd
 
 def is_trading_day():
     """Check if today is a trading day (Monday-Friday, not holiday)"""
@@ -32,19 +33,10 @@ def main():
         print("❌ Database build failed")
         return
     
-    # Step 2: Run Analysis
-    print("\n[STEP 2] Running COIL analysis...")
-    from cell3_coil_analysis import run_analysis
-    results = run_analysis()
-    
-    if results is None or len(results) == 0:
-        print("❌ Analysis failed or no results")
-        return
-    
-    # Step 3: Send Telegram Alert
-    print("\n[STEP 3] Sending Telegram alert...")
-    from cell4_telegram_alert import send_daily_alert
-    send_daily_alert()
+    # Step 2: Run Analysis (cell3 already sends Telegram alert)
+    print("\n[STEP 2] Running COIL analysis & sending alert...")
+    from cell3_coil_analysis import main as run_coil_analysis
+    run_coil_analysis()   # This sends Telegram and saves CSV
     
     print("\n" + "=" * 60)
     print("✅ Pipeline complete")
