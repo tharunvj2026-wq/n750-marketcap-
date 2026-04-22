@@ -1,6 +1,6 @@
 # ============================================
-# CELL 4: DAILY SWEEP CANDLE SCANNER (FIXED)
-# Condition: Open & Close inside previous body, Low < previous low
+# CELL 4: DAILY SWEEP CANDLE SCANNER (AUTO-LATEST DATE)
+# Always uses the most recent date available in cache
 # ============================================
 
 import os
@@ -15,25 +15,29 @@ from cell3_coil_analysis import send_telegram_message
 
 CACHE_FILE = "nifty750_bhavcopy_cache.csv"
 
-def is_trading_day(date):
-    return date.weekday() < 5
+def get_latest_trading_date_from_cache():
+    """Get the most recent date that exists in the cache"""
+    if not os.path.exists(CACHE_FILE):
+        return None
+    df = pd.read_csv(CACHE_FILE, parse_dates=['DATE'])
+    if df.empty:
+        return None
+    latest = df['DATE'].max().date()
+    return latest
 
-def get_previous_trading_day(date):
-    d = date - timedelta(days=1)
-    while not is_trading_day(d):
-        d -= timedelta(days=1)
-    return d
-
-def get_last_n_trading_dates(n=2):
-    dates = []
-    d = datetime.now().date()
-    while len(dates) < n:
-        if is_trading_day(d):
-            dates.append(d)
-        d -= timedelta(days=1)
-    return sorted(dates, reverse=True)  # newest first
+def get_previous_trading_date_from_cache(date):
+    """Get previous trading date that exists in cache (not just calendar)"""
+    if not os.path.exists(CACHE_FILE):
+        return None
+    df = pd.read_csv(CACHE_FILE, parse_dates=['DATE'])
+    dates = sorted(df['DATE'].dt.date.unique())
+    idx = dates.index(date)
+    if idx > 0:
+        return dates[idx-1]
+    return None
 
 def fetch_candle(symbol, target_date):
+    """Fetch candle from cache for exact date"""
     try:
         if not os.path.exists(CACHE_FILE):
             return None
@@ -70,17 +74,23 @@ def scan_symbol(symbol, target, prev):
 
 def main():
     print("=" * 60)
-    print("DAILY SWEEP SCANNER")
+    print("DAILY SWEEP SCANNER (Auto-latest date)")
     print("=" * 60)
 
-    trading_dates = get_last_n_trading_dates(2)
-    if len(trading_dates) < 2:
-        print("Not enough trading dates")
+    # Get latest date from cache
+    target_date = get_latest_trading_date_from_cache()
+    if target_date is None:
+        print("❌ No cache data found. Run cell2_build_db.py first.")
         return
 
-    target_date = trading_dates[0]   # latest
-    prev_date = trading_dates[1]     # previous
-    print(f"Checking sweep from {prev_date} to {target_date}")
+    prev_date = get_previous_trading_date_from_cache(target_date)
+    if prev_date is None:
+        print(f"❌ Only one date in cache: {target_date}. Need at least two dates for sweep.")
+        return
+
+    print(f"📅 Latest cached date: {target_date}")
+    print(f"📅 Previous cached date: {prev_date}")
+    print(f"🔍 Checking sweep condition from {prev_date} to {target_date}")
 
     # Scan in parallel
     results = []
@@ -93,19 +103,17 @@ def main():
             if r:
                 results.append(r)
 
-    print(f"\nFound {len(results)} sweep candles")
+    print(f"\n✅ Found {len(results)} sweep candles")
 
     # Build Telegram message
     if not results:
         msg = f"🔍 SWEEP DAILY | {target_date.strftime('%d-%b-%Y')}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n⚠️ NO SWEEP CANDLES FOUND"
     else:
-        # Group by segment
         seg_map = {'LARGE': [], 'MID': [], 'SMALL': [], 'MICRO': []}
         for r in results:
             seg = r['segment']
             if seg in seg_map:
                 seg_map[seg].append(r)
-        # Build message
         msg = f"🎯 SWEEP DAILY | {target_date.strftime('%d-%b-%Y')}\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         for seg in ['LARGE', 'MID', 'SMALL', 'MICRO']:
             if seg_map[seg]:
@@ -115,7 +123,7 @@ def main():
         msg += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━\n📊 Total: {len(results)} stocks"
 
     send_telegram_message(msg)
-    print("Alert sent")
+    print("✅ Alert sent")
 
 if __name__ == "__main__":
     main()
